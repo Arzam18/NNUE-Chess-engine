@@ -1,0 +1,145 @@
+
+name: Build Kociolek Android ARM64 NEON
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/android.yml"
+      - "Makefile"
+      - "src/**"
+      - "tools/**"
+      - "*.bin"
+
+permissions:
+  contents: write
+
+jobs:
+  build-android:
+    name: Build Android ARM64 NEON
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y make file binutils
+
+      - name: Locate Android NDK
+        id: ndk
+        shell: bash
+        run: |
+          NDK="${ANDROID_NDK_LATEST_HOME:-}"
+          if [ -z "$NDK" ] || [ ! -x "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++" ]; then
+            NDK="${ANDROID_HOME}/ndk/$(ls "${ANDROID_HOME}/ndk" | sort -V | tail -n 1)"
+          fi
+
+          if [ ! -x "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++" ]; then
+            echo "Android NDK clang++ was not found."
+            exit 1
+          fi
+
+          echo "ndk=$NDK" >> "$GITHUB_OUTPUT"
+          echo "Using NDK: $NDK"
+
+      - name: Verify network files
+        shell: bash
+        run: |
+          set -eu
+
+          echo "Repository network files:"
+          find . -maxdepth 2 -type f -name '*.bin' -print
+
+          test -f tools/embed_policy.py || {
+            echo "Missing tools/embed_policy.py"
+            exit 1
+          }
+
+          test -f src/policy_embed.h -o \
+               -f quantised-dual-layer-hard-2048.bin
+
+      - name: Build ARM64 engine with NEON
+        shell: bash
+        env:
+          NDK_PATH: ${{ steps.ndk.outputs.ndk }}
+        run: |
+          set -euxo pipefail
+
+          TOOLCHAIN="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export PATH="$TOOLCHAIN:$PATH"
+
+          # Use network filenames that exist in this checkout.
+          # The large policy network is the 2048-hidden-layer network.
+          test -f 768-1024x2-1-8.bin
+          test -f quantised-dual-layer-hard-2048.bin
+          test -f quantised-64.bin
+
+          # Android API 24, ARM64, ARMv8-A SIMD/NEON.
+          export CXX="$TOOLCHAIN/aarch64-linux-android24-clang++"
+          export PYTHON=python3
+
+          # Do not inherit the Makefile's x86-64-v3 or static Linux flags.
+          # Keep the generated neural-network headers and compile all sources.
+          make clean-embed || true
+          make clean || true
+
+          make -j2 \
+            CXX="$CXX" \
+            PYTHON="$PYTHON" \
+            TARGET=Kociolek-2.2-android-arm64 \
+            EVALFILE=768-1024x2-1-8.bin \
+            POLICYFILE=quantised-dual-layer-hard-2048.bin \
+            POLICYFILE_SMALL=quantised-64.bin \
+            POLICY_EMBED_BIN=quantised-dual-layer-hard-2048.bin \
+            POLICY_SMALL_EMBED_BIN=quantised-64.bin \
+            KOCIOLEK_POLICY_HL=2048 \
+            POLICY_SMALL_HL=64 \
+            'CXXFLAGS=-std=c++17 -O3 -DNDEBUG -pthread -flto -march=armv8-a+simd -mtune=cortex-a53 -static-libstdc++'
+
+          mkdir -p dist
+          cp Kociolek-2.2-android-arm64 dist/Kociolek-2.2-android-arm64
+          chmod +x dist/Kociolek-2.2-android-arm64
+
+          file dist/Kociolek-2.2-android-arm64
+          llvm-readelf -h dist/Kociolek-2.2-android-arm64
+          llvm-readelf -d dist/Kociolek-2.2-android-arm64 || true
+
+      - name: Test executable architecture
+        shell: bash
+        run: |
+          set -eu
+
+          BIN=dist/Kociolek-2.2-android-arm64
+
+          file "$BIN" | tee dist/build-info.txt
+          llvm-readelf -h "$BIN" >> dist/build-info.txt
+
+          grep -q 'AArch64' dist/build-info.txt || {
+            echo "ERROR: Output is not an ARM64 executable."
+            exit 1
+          }
+
+      - name: Upload Android engine
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kociolek-2.2-Android-ARM64-NEON
+          path: |
+            dist/Kociolek-2.2-android-arm64
+            dist/build-info.txt
+          if-no-files-found: error
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/Kociolek-2.2-android-arm64
+            dist/build-info.txt
