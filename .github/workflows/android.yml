@@ -1,4 +1,4 @@
-name: Build Kociolek Android ARM64 Standalone
+name: Build Kociolek Android ARM64
 
 on:
   workflow_dispatch:
@@ -14,9 +14,10 @@ permissions:
   contents: read
 
 jobs:
-  build-android:
-    name: Build standalone Android ARM64 engine
+  android-arm64:
+    name: Build Android ARM64 with ARM NEON
     runs-on: ubuntu-22.04
+
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
@@ -24,7 +25,7 @@ jobs:
       - name: Install build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y make file binutils python3
+          sudo apt-get install -y make python3 file binutils zip
 
       - name: Locate Android NDK
         id: ndk
@@ -33,82 +34,45 @@ jobs:
           set -euo pipefail
           NDK="${ANDROID_NDK_LATEST_HOME:-}"
           if [ -z "$NDK" ] || [ ! -x "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++" ]; then
-            NDK="${ANDROID_HOME}/ndk/$(ls "${ANDROID_HOME}/ndk" | sort -V | tail -n 1)"
+            NDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}/ndk"
+            test -d "$NDK_ROOT"
+            NDK="$NDK_ROOT/$(ls "$NDK_ROOT" | sort -V | tail -n 1)"
           fi
           test -x "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++"
           echo "ndk=$NDK" >> "$GITHUB_OUTPUT"
 
-      - name: Verify and embed evaluation network
+      - name: Verify network files
         shell: bash
         run: |
           set -euo pipefail
-          test -f quantised-v14.bin
-          test -f Policy-big.bin
-          test -f quantised-64.bin
-          test -f src/nnue.cpp
-          python3 - <<'PY'
-          from pathlib import Path
-          data = Path("quantised-v14.bin").read_bytes()
-          expected = 2 * (768 * 1024 + 1024 + 2 * 1024 * 8 + 8)
-          if len(data) != expected:
-              raise SystemExit(f"Invalid NNUE size: {len(data)} bytes; expected {expected}")
-          with open("src/nnue_embed.h", "w") as f:
-              f.write("#pragma once\n#include <cstddef>\n")
-              f.write("alignas(64) static const unsigned char g_nnue_embed[] = {\n")
-              for i in range(0, len(data), 16):
-                  f.write("    " + ", ".join(f"0x{b:02x}" for b in data[i:i+16]) + ",\n")
-              f.write("};\nstatic const std::size_t g_nnue_embed_size = sizeof(g_nnue_embed);\n")
-          print(f"Embedded quantised-v14.bin ({len(data)} bytes)")
-          PY
+          for f in quantised-v14.bin Policy-big.bin quantised-64.bin; do
+            if [ ! -s "$f" ]; then
+              echo "::error::Required network file is missing or empty: $f"
+              exit 1
+            fi
+          done
 
-      - name: Patch NNUE loader to use embedded network
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path("src/nnue.cpp")
-          s = p.read_text()
-          if '#include "nnue_embed.h"' not in s:
-              anchor = '#include <fstream>'
-              if anchor not in s:
-                  raise SystemExit("Could not locate #include <fstream> in src/nnue.cpp")
-              s = s.replace(anchor, anchor + '\n#include <sstream>\n#include <string>\n#ifdef EMBED_NNUE\n#include "nnue_embed.h"\n#endif', 1)
-          old = 'std::ifstream stream(filepath, std::ios::binary);'
-          new = '''#ifdef EMBED_NNUE
-              std::istringstream stream(
-                  std::string(reinterpret_cast<const char*>(g_nnue_embed), g_nnue_embed_size),
-                  std::ios::in | std::ios::binary
-              );
-          #else
-              std::ifstream stream(filepath, std::ios::binary);
-          #endif'''
-          if old in s:
-              s = s.replace(old, new, 1)
-          elif 'std::istringstream stream(' not in s:
-              raise SystemExit("Could not find the expected NNUE stream declaration; refusing to build")
-          p.write_text(s)
-          PY
-
-      - name: Build Android ARM64 engine
+      - name: Build ARM64 engine
         shell: bash
         env:
           NDK_PATH: ${{ steps.ndk.outputs.ndk }}
         run: |
           set -euo pipefail
           TOOLCHAIN="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          export PATH="$TOOLCHAIN:$PATH"
+
           export CXX="$TOOLCHAIN/aarch64-linux-android24-clang++"
           export CC="$TOOLCHAIN/aarch64-linux-android24-clang"
           export AR="$TOOLCHAIN/llvm-ar"
           export RANLIB="$TOOLCHAIN/llvm-ranlib"
           export STRIP="$TOOLCHAIN/llvm-strip"
           export PYTHON=python3
-          # Do not pass CXXFLAGS=... as a make command-line argument: the Makefile
-          # must append its EVALFILE/POLICYFILE macro definitions.
-          export CXXFLAGS='-std=c++17 -O3 -DNDEBUG -pthread -march=armv8-a+simd -mtune=cortex-a53 -static-libstdc++ -DEMBED_NNUE'
-          if make -n clean >/dev/null 2>&1; then make clean || true; fi
-          if make -n clean-embed >/dev/null 2>&1; then make clean-embed || true; fi
+
+          # AArch64 Android supports Advanced SIMD (NEON) as part of the architecture.
+          # Keep CXXFLAGS in the environment so Makefile's -D network settings are appended.
+          export CXXFLAGS='-std=c++17 -O3 -DNDEBUG -pthread -march=armv8-a+simd -mtune=cortex-a53 -static-libstdc++'
+
+          make clean || true
+          make clean-embed || true
           make -j2 \
             TARGET=Kociolek-2.3-android-arm64 \
             EVALFILE=quantised-v14.bin \
@@ -116,19 +80,25 @@ jobs:
             POLICYFILE_SMALL=quantised-64.bin \
             KOCIOLEK_POLICY_HL=2048 \
             POLICY_SMALL_HL=64
-          test -f Kociolek-2.3-android-arm64
+
+          test -s Kociolek-2.3-android-arm64
           mkdir -p dist
           cp Kociolek-2.3-android-arm64 dist/
+          cp quantised-v14.bin dist/
           chmod +x dist/Kociolek-2.3-android-arm64
+
           file dist/Kociolek-2.3-android-arm64 | tee dist/build-info.txt
           "$TOOLCHAIN/llvm-readelf" -h dist/Kociolek-2.3-android-arm64 >> dist/build-info.txt
-          grep -q AArch64 dist/build-info.txt
+          grep -q 'AArch64' dist/build-info.txt
 
-      - name: Upload standalone engine
+          # The evaluation net is a required runtime companion file.
+          # Policy nets are embedded by the Makefile.
+          (cd dist && zip -9 Kociolek-2.3-Android-ARM64.zip \
+            Kociolek-2.3-android-arm64 quantised-v14.bin build-info.txt)
+
+      - name: Upload Android ARM64 build
         uses: actions/upload-artifact@v4
         with:
-          name: Kociolek-2.3-Android-ARM64-Standalone
-          path: |
-            dist/Kociolek-2.3-android-arm64
-            dist/build-info.txt
+          name: Kociolek-2.3-Android-ARM64
+          path: dist/Kociolek-2.3-Android-ARM64.zip
           if-no-files-found: error
