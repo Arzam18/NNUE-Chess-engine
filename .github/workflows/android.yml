@@ -1,5 +1,4 @@
-
-name: Build Kociolek Android ARM64 NEON
+name: Build Kociolek Android ARM64 Standalone
 
 on:
   workflow_dispatch:
@@ -16,9 +15,8 @@ permissions:
 
 jobs:
   build-android:
-    name: Build Android ARM64 NEON
+    name: Build standalone Android ARM64 engine
     runs-on: ubuntu-22.04
-
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
@@ -33,130 +31,104 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           NDK="${ANDROID_NDK_LATEST_HOME:-}"
-
           if [ -z "$NDK" ] || [ ! -x "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++" ]; then
             NDK="${ANDROID_HOME}/ndk/$(ls "${ANDROID_HOME}/ndk" | sort -V | tail -n 1)"
           fi
-
-          if [ ! -x "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++" ]; then
-            echo "Android NDK clang++ was not found."
-            exit 1
-          fi
-
+          test -x "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++"
           echo "ndk=$NDK" >> "$GITHUB_OUTPUT"
-          echo "Using NDK: $NDK"
 
-      - name: Verify source and network files
+      - name: Verify and embed evaluation network
         shell: bash
         run: |
-          set -euxo pipefail
-
-          test -f Makefile
+          set -euo pipefail
+          test -f quantised-v14.bin
           test -f Policy-big.bin
           test -f quantised-64.bin
-          test -f quantised-v14.bin
+          test -f src/nnue.cpp
+          python3 - <<'PY'
+          from pathlib import Path
+          data = Path("quantised-v14.bin").read_bytes()
+          expected = 2 * (768 * 1024 + 1024 + 2 * 1024 * 8 + 8)
+          if len(data) != expected:
+              raise SystemExit(f"Invalid NNUE size: {len(data)} bytes; expected {expected}")
+          with open("src/nnue_embed.h", "w") as f:
+              f.write("#pragma once\n#include <cstddef>\n")
+              f.write("alignas(64) static const unsigned char g_nnue_embed[] = {\n")
+              for i in range(0, len(data), 16):
+                  f.write("    " + ", ".join(f"0x{b:02x}" for b in data[i:i+16]) + ",\n")
+              f.write("};\nstatic const std::size_t g_nnue_embed_size = sizeof(g_nnue_embed);\n")
+          print(f"Embedded quantised-v14.bin ({len(data)} bytes)")
+          PY
 
-          echo "Repository network files:"
-          ls -lh Policy-big.bin quantised-64.bin quantised-v14.bin
+      - name: Patch NNUE loader to use embedded network
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("src/nnue.cpp")
+          s = p.read_text()
+          if '#include "nnue_embed.h"' not in s:
+              anchor = '#include <fstream>'
+              if anchor not in s:
+                  raise SystemExit("Could not locate #include <fstream> in src/nnue.cpp")
+              s = s.replace(anchor, anchor + '\n#include <sstream>\n#include <string>\n#ifdef EMBED_NNUE\n#include "nnue_embed.h"\n#endif', 1)
+          old = 'std::ifstream stream(filepath, std::ios::binary);'
+          new = '''#ifdef EMBED_NNUE
+              std::istringstream stream(
+                  std::string(reinterpret_cast<const char*>(g_nnue_embed), g_nnue_embed_size),
+                  std::ios::in | std::ios::binary
+              );
+          #else
+              std::ifstream stream(filepath, std::ios::binary);
+          #endif'''
+          if old in s:
+              s = s.replace(old, new, 1)
+          elif 'std::istringstream stream(' not in s:
+              raise SystemExit("Could not find the expected NNUE stream declaration; refusing to build")
+          p.write_text(s)
+          PY
 
-          echo "Makefile targets and network references:"
-          grep -nE '^(all|clean|clean-embed|embed|build):|EVALFILE|POLICYFILE|embed_policy|march=|x86-64' Makefile || true
-
-      - name: Build ARM64 NEON engine
+      - name: Build Android ARM64 engine
         shell: bash
         env:
           NDK_PATH: ${{ steps.ndk.outputs.ndk }}
         run: |
-          set -euxo pipefail
-
+          set -euo pipefail
           TOOLCHAIN="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin"
           export PATH="$TOOLCHAIN:$PATH"
-
           export CXX="$TOOLCHAIN/aarch64-linux-android24-clang++"
+          export CC="$TOOLCHAIN/aarch64-linux-android24-clang"
           export AR="$TOOLCHAIN/llvm-ar"
           export RANLIB="$TOOLCHAIN/llvm-ranlib"
           export STRIP="$TOOLCHAIN/llvm-strip"
-
-          # Show the actual Makefile before building.
-          sed -n '1,240p' Makefile
-
-          # Clean only if these targets exist.
-          if make -n clean >/dev/null 2>&1; then
-            make clean || true
-          fi
-
-          if make -n clean-embed >/dev/null 2>&1; then
-            make clean-embed || true
-          fi
-
-          # ARMv8-A + NEON; do not use x86-specific instruction flags.
+          export PYTHON=python3
+          # Do not pass CXXFLAGS=... as a make command-line argument: the Makefile
+          # must append its EVALFILE/POLICYFILE macro definitions.
+          export CXXFLAGS='-std=c++17 -O3 -DNDEBUG -pthread -march=armv8-a+simd -mtune=cortex-a53 -static-libstdc++ -DEMBED_NNUE'
+          if make -n clean >/dev/null 2>&1; then make clean || true; fi
+          if make -n clean-embed >/dev/null 2>&1; then make clean-embed || true; fi
           make -j2 \
-            CXX="$CXX" \
-            CC="$TOOLCHAIN/aarch64-linux-android24-clang" \
-            AR="$AR" \
-            RANLIB="$RANLIB" \
-            STRIP="$STRIP" \
-            PYTHON=python3 \
-            TARGET=Kociolek-2.2-android-arm64 \
+            TARGET=Kociolek-2.3-android-arm64 \
             EVALFILE=quantised-v14.bin \
             POLICYFILE=Policy-big.bin \
             POLICYFILE_SMALL=quantised-64.bin \
-            'CXXFLAGS=-std=c++17 -O3 -DNDEBUG -pthread -march=armv8-a+simd -mtune=cortex-a53 -static-libstdc++'
-
+            KOCIOLEK_POLICY_HL=2048 \
+            POLICY_SMALL_HL=64
+          test -f Kociolek-2.3-android-arm64
           mkdir -p dist
+          cp Kociolek-2.3-android-arm64 dist/
+          chmod +x dist/Kociolek-2.3-android-arm64
+          file dist/Kociolek-2.3-android-arm64 | tee dist/build-info.txt
+          "$TOOLCHAIN/llvm-readelf" -h dist/Kociolek-2.3-android-arm64 >> dist/build-info.txt
+          grep -q AArch64 dist/build-info.txt
 
-          # Locate the generated executable without mistaking a source file
-          # or network file for the engine.
-          BIN=""
-
-          for candidate in \
-            Kociolek-2.2-android-arm64 \
-            Kociolek \
-            kociolek \
-            engine
-          do
-            if [ -f "$candidate" ] && file "$candidate" | grep -q ELF; then
-              BIN="$candidate"
-              break
-            fi
-          done
-
-          if [ -z "$BIN" ]; then
-            echo "Expected executable not found. Build outputs:"
-            find . -maxdepth 3 -type f -exec file {} \;
-            exit 1
-          fi
-
-          cp "$BIN" dist/Kociolek-2.2-android-arm64
-          chmod +x dist/Kociolek-2.2-android-arm64
-
-          file dist/Kociolek-2.2-android-arm64
-          "$TOOLCHAIN/llvm-readelf" -h dist/Kociolek-2.2-android-arm64
-
-      - name: Verify ARM64 architecture
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          BIN=dist/Kociolek-2.2-android-arm64
-          TOOLCHAIN="${NDK_PATH:-${ANDROID_NDK_LATEST_HOME}}/toolchains/llvm/prebuilt/linux-x86_64/bin"
-
-          file "$BIN" | tee dist/build-info.txt
-
-          "$TOOLCHAIN/llvm-readelf" -h "$BIN" >> dist/build-info.txt
-
-          grep -q 'AArch64' dist/build-info.txt || {
-            echo "ERROR: Output is not an ARM64 executable."
-            exit 1
-          }
-
-      - name: Upload Android engine
+      - name: Upload standalone engine
         uses: actions/upload-artifact@v4
         with:
-          name: Kociolek-Android-ARM64-NEON
+          name: Kociolek-2.3-Android-ARM64-Standalone
           path: |
-            dist/Kociolek-2.2-android-arm64
+            dist/Kociolek-2.3-android-arm64
             dist/build-info.txt
           if-no-files-found: error
