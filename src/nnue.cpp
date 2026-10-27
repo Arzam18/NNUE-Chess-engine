@@ -52,7 +52,55 @@ usize NNUE::getMaterialBucket(const chess::Board& board) {
 // ============================================================================
 // Vectorized SCReLU Forward Pass
 // ============================================================================
-#if defined(__x86_64__) || defined(__amd64__) || (defined(_WIN64) && (defined(_M_X64) || defined(_M_AMD64)))
+#if defined(__aarch64__) || defined(__ARM_NEON) || defined(__ARM_NEON__)
+#include <arm_neon.h>
+
+#pragma message("Using ARM NEON NNUE inference")
+
+i32 NNUE::vectorizedSCReLU(const Accumulator& stm, const Accumulator& nstm, usize bucket) {
+    // NEON computes four 32-bit products per vector. Widen before multiplying:
+    // SCReLU(x) * weight = clamp(x, 0, QA)^2 * weight.
+    // Widening avoids overflowing the 16-bit intermediate at QA=255.
+    i64 total = 0;
+    const int16x8_t zero = vdupq_n_s16(0);
+    const int16x8_t qa = vdupq_n_s16(QA);
+
+    for (usize i = 0; i < HL_SIZE; i += 8) {
+        const int16x8_t s = vminq_s16(vmaxq_s16(vld1q_s16(&stm.values[i]), zero), qa);
+        const int16x8_t n = vminq_s16(vmaxq_s16(vld1q_s16(&nstm.values[i]), zero), qa);
+        const int16x8_t sw = vld1q_s16(&weightsToOut[bucket][i]);
+        const int16x8_t nw = vld1q_s16(&weightsToOut[bucket][i + HL_SIZE]);
+
+        // Process low and high halves separately, widening each lane to int32.
+        int32x4_t ssq0 = vmull_s16(vget_low_s16(s), vget_low_s16(s));
+        int32x4_t ssq1 = vmull_s16(vget_high_s16(s), vget_high_s16(s));
+        int32x4_t nsq0 = vmull_s16(vget_low_s16(n), vget_low_s16(n));
+        int32x4_t nsq1 = vmull_s16(vget_high_s16(n), vget_high_s16(n));
+
+        int32x4_t sw0 = vmovl_s16(vget_low_s16(sw));
+        int32x4_t sw1 = vmovl_s16(vget_high_s16(sw));
+        int32x4_t nw0 = vmovl_s16(vget_low_s16(nw));
+        int32x4_t nw1 = vmovl_s16(vget_high_s16(nw));
+
+        int32x4_t p0 = vmulq_s32(ssq0, sw0);
+        int32x4_t p1 = vmulq_s32(ssq1, sw1);
+        int32x4_t p2 = vmulq_s32(nsq0, nw0);
+        int32x4_t p3 = vmulq_s32(nsq1, nw1);
+
+        total += vgetq_lane_s32(p0, 0) + (i64)vgetq_lane_s32(p0, 1)
+               + (i64)vgetq_lane_s32(p0, 2) + (i64)vgetq_lane_s32(p0, 3);
+        total += vgetq_lane_s32(p1, 0) + (i64)vgetq_lane_s32(p1, 1)
+               + (i64)vgetq_lane_s32(p1, 2) + (i64)vgetq_lane_s32(p1, 3);
+        total += vgetq_lane_s32(p2, 0) + (i64)vgetq_lane_s32(p2, 1)
+               + (i64)vgetq_lane_s32(p2, 2) + (i64)vgetq_lane_s32(p2, 3);
+        total += vgetq_lane_s32(p3, 0) + (i64)vgetq_lane_s32(p3, 1)
+               + (i64)vgetq_lane_s32(p3, 2) + (i64)vgetq_lane_s32(p3, 3);
+    }
+
+    return static_cast<i32>(total);
+}
+
+#elif defined(__x86_64__) || defined(__amd64__) || (defined(_WIN64) && (defined(_M_X64) || defined(_M_AMD64)))
 #include <immintrin.h>
 
 #if defined(__AVX512F__)
