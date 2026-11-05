@@ -51,6 +51,7 @@ CXXFLAGS += -DPOLICY_SMALL_HL=$(POLICY_SMALL_HL)
 TARGET ?= $(or $(EXE), Kociolek-2.3.exe)
 
 SOURCES = $(wildcard src/*.cpp)
+EXTRA_OBJECTS ?=
 
 all: $(TARGET)
 
@@ -69,15 +70,15 @@ embed: src/policy_embed.h src/policy_embed_small.h
 # Binary
 # ============================================================================
 
-$(TARGET): $(SOURCES) src/policy_embed.h src/policy_embed_small.h
-> $(CXX) $(CXXFLAGS) $(SOURCES) -o $(TARGET)
+$(TARGET): $(SOURCES) src/policy_embed.h src/policy_embed_small.h $(EXTRA_OBJECTS)
+> $(CXX) $(CXXFLAGS) $(SOURCES) $(EXTRA_OBJECTS) -o $(TARGET)
 
 # ============================================================================
 # Clean
 # ============================================================================
 
 clean:
-> rm -f $(TARGET)
+> rm -f $(TARGET) nnue_embed.o
 
 clean-embed:
 > rm -f src/policy_embed.h src/policy_embed_small.h
