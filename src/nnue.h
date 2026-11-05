@@ -4,6 +4,8 @@
 #include "chess.hpp"
 #include <array>
 #include <string>
+#include <cstdint>
+#include <cstddef>
 // Include types.h for ThreadInfo
 #include "types.h"
 
@@ -35,6 +37,7 @@ struct NNUE {
     
     static usize getMaterialBucket(const chess::Board& board);
     bool loadNetwork(const std::string& filepath);
+    bool loadNetworkFromMemory(const std::uint8_t* data, std::size_t size, const char* label = "embedded quantised-v14.bin");
     int forwardPass(const chess::Board* board, const AccumulatorPair& accumulators);
     static i16 evaluate(const chess::Board& board, ThreadInfo& thisThread);
     void debugNetwork(const chess::Board& board, const AccumulatorPair& accumulators);

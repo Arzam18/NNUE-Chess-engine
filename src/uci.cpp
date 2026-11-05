@@ -40,6 +40,13 @@
 #define HAVE_POLICY_SMALL_EMBED 0
 #endif
 
+#if defined(KOCIOLEK_EMBED_NNUE)
+extern "C" {
+extern const unsigned char g_kociolek_nnue_start[];
+extern const unsigned char g_kociolek_nnue_end[];
+}
+#endif
+
 #ifndef EVALFILE
 #define EVALFILE "HM.bin"
 #endif
@@ -106,7 +113,20 @@ static std::string getExecutablePath(int argc, char* argv[]) {
 }
 
 static bool loadDefaultNNUE(int argc, char* argv[]) {
-    // First preserve the normal UCI/current-working-directory behavior.
+#if defined(KOCIOLEK_EMBED_NNUE)
+    const std::size_t embeddedSize = static_cast<std::size_t>(
+        reinterpret_cast<std::uintptr_t>(g_kociolek_nnue_end) -
+        reinterpret_cast<std::uintptr_t>(g_kociolek_nnue_start));
+    std::cout << "info string Loading embedded NNUE quantised-v14.bin ("
+              << embeddedSize << " bytes)..." << std::endl;
+    if (g_nnue.loadNetworkFromMemory(g_kociolek_nnue_start, embeddedSize,
+                                     "embedded quantised-v14.bin")) {
+        return true;
+    }
+    std::cout << "info string Embedded NNUE failed; trying external EvalFile fallback"
+              << std::endl;
+#endif
+    // Preserve the normal UCI/current-working-directory behavior as a fallback.
     if (g_nnue.loadNetwork(EVALFILE)) return true;
 
     const std::string evalName = EVALFILE;
@@ -594,8 +614,7 @@ static bool process_command(const std::string& line, chess::Board& board, Thread
     } else if (command == "go") {
         if (!g_nnue.loaded) {
             std::cout << "info string ERROR: search refused; NNUE is not loaded. "
-                      << "Place " << EVALFILE
-                      << " beside the engine or set the EvalFile option to its full path."
+                      << "Embedded NNUE is unavailable; set EvalFile to a valid network path."
                       << std::endl;
             std::cout << "bestmove 0000" << std::endl;
             std::cout.flush();

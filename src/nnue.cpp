@@ -233,12 +233,9 @@ usize NNUE::feature(chess::Color perspective, chess::Color color, chess::PieceTy
 // ============================================================================
 // Network Loading
 // ============================================================================
-bool NNUE::loadNetwork(const std::string& filepath) {
-    // The serialized tensor payload is followed by padding up to a 64-byte
-    // file boundary in the distributed quantised-v14.bin model. The original
-    // loader consumed the tensor blocks sequentially and ignored this tail.
-    // Accept either the raw tensor payload or its exact 64-byte-aligned size;
-    // never treat the padding as NNUE weights.
+bool NNUE::loadNetworkFromMemory(const std::uint8_t* data,
+                                std::size_t actualFileSize,
+                                const char* label) {
     const std::size_t payloadSize = sizeof(i16) *
         (INPUT_SIZE * HL_SIZE + HL_SIZE +
          2 * HL_SIZE * OUTPUT_BUCKETS + OUTPUT_BUCKETS);
@@ -246,42 +243,21 @@ bool NNUE::loadNetwork(const std::string& filepath) {
     const std::size_t paddedFileSize =
         (payloadSize + FILE_ALIGNMENT - 1) & ~(FILE_ALIGNMENT - 1);
 
-    // Read into a temporary heap buffer first. A failed read must not leave a
-    // partially overwritten network active in the searcher.
-    std::ifstream stream(filepath, std::ios::binary | std::ios::ate);
-    if (!stream.is_open()) {
-        std::cout << "info string NNUE load failed: cannot open "
-                  << filepath << std::endl;
-        return false;
-    }
-
-    const std::streamoff fileSize = stream.tellg();
-    const std::uint64_t actualFileSize =
-        fileSize < 0 ? 0 : static_cast<std::uint64_t>(fileSize);
-    if (fileSize < 0 ||
+    if (data == nullptr ||
         (actualFileSize != payloadSize && actualFileSize != paddedFileSize)) {
-        std::cout << "info string NNUE load failed: size mismatch for "
-                  << filepath << " (got " << actualFileSize
-                  << " bytes, expected payload " << payloadSize
-                  << " bytes or 64-byte-padded file " << paddedFileSize
-                  << " bytes)" << std::endl;
+        std::cout << "info string NNUE load failed: invalid embedded/file size for "
+                  << (label ? label : "memory") << " (got " << actualFileSize
+                  << ", expected " << payloadSize << " or " << paddedFileSize
+                  << ")" << std::endl;
         return false;
     }
 
-    // Deliberately read only the tensor payload. For the shipped file this
-    // leaves its final 48-byte alignment tail unread.
-    std::vector<std::uint8_t> data(payloadSize);
-    stream.seekg(0, std::ios::beg);
-    if (!stream.read(reinterpret_cast<char*>(data.data()),
-                     static_cast<std::streamsize>(data.size()))) {
-        std::cout << "info string NNUE load failed: incomplete read from "
-                  << filepath << std::endl;
-        return false;
-    }
-
+    // Parse into temporary storage before changing the live network. This
+    // preserves an already-loaded network if any validation fails.
+    std::vector<std::uint8_t> validated(data, data + payloadSize);
     std::size_t offset = 0;
     auto copyBlock = [&](void* destination, std::size_t bytes) {
-        std::memcpy(destination, data.data() + offset, bytes);
+        std::memcpy(destination, validated.data() + offset, bytes);
         offset += bytes;
     };
 
@@ -294,22 +270,45 @@ bool NNUE::loadNetwork(const std::string& filepath) {
     copyBlock(outputBias.data(), outputBias.size() * sizeof(i16));
 
     if (offset != payloadSize) {
-        // Defensive consistency check; the block layout must consume the
-        // complete tensor payload. Any accepted alignment tail is not data.
         loaded = false;
-        std::cout << "info string NNUE load failed: internal layout mismatch"
-                  << std::endl;
+        std::cout << "info string NNUE load failed: internal layout mismatch" << std::endl;
         return false;
     }
 
     loaded = true;
-    std::cout << "info string NNUE loaded: " << filepath
+    std::cout << "info string NNUE loaded: " << (label ? label : "memory")
               << " file_bytes=" << actualFileSize
               << " payload_bytes=" << payloadSize
               << " padding_bytes=" << (actualFileSize - payloadSize)
               << " hidden=" << HL_SIZE
               << " buckets=" << OUTPUT_BUCKETS << std::endl;
     return true;
+}
+
+bool NNUE::loadNetwork(const std::string& filepath) {
+    std::ifstream stream(filepath, std::ios::binary | std::ios::ate);
+    if (!stream.is_open()) {
+        std::cout << "info string NNUE load failed: cannot open "
+                  << filepath << std::endl;
+        return false;
+    }
+
+    const std::streamoff fileSize = stream.tellg();
+    if (fileSize < 0) {
+        std::cout << "info string NNUE load failed: cannot determine size for "
+                  << filepath << std::endl;
+        return false;
+    }
+    const std::size_t size = static_cast<std::size_t>(fileSize);
+    std::vector<std::uint8_t> data(size);
+    stream.seekg(0, std::ios::beg);
+    if (!stream.read(reinterpret_cast<char*>(data.data()),
+                     static_cast<std::streamsize>(data.size()))) {
+        std::cout << "info string NNUE load failed: incomplete read from "
+                  << filepath << std::endl;
+        return false;
+    }
+    return loadNetworkFromMemory(data.data(), data.size(), filepath.c_str());
 }
 
 // ============================================================================
