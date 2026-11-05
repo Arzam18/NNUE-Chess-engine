@@ -34,7 +34,7 @@ jobs:
           test -x "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++"
           echo "ndk=$NDK" >> "$GITHUB_OUTPUT"
 
-      - name: Build with embedded NNUE
+      - name: Build with explicitly enabled embedded NNUE loader
         shell: bash
         env:
           NDK_PATH: ${{ steps.ndk.outputs.ndk }}
@@ -50,10 +50,11 @@ jobs:
             exit 1
           fi
           unzip -p dist/Kociolek-2.3-Android-ARM64.zip build-info.txt | grep -q 'Embedded NNUE: quantised-v14.bin'
+          unzip -p dist/Kociolek-2.3-Android-ARM64.zip build-info.txt | grep -q 'Embedded loader compile flag: -DKOCIOLEK_EMBED_NNUE=1'
 
       - name: Upload Android ARM64 engine
         uses: actions/upload-artifact@v4
         with:
-          name: Kociolek-2.3-Android-ARM64-Embedded-NNUE
+          name: Kociolek-2.3-Android-ARM64-Embedded-NNUE-FIXED
           path: dist/Kociolek-2.3-Android-ARM64.zip
           if-no-files-found: error
