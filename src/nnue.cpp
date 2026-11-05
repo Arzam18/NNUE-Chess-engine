@@ -234,9 +234,17 @@ usize NNUE::feature(chess::Color perspective, chess::Color color, chess::PieceTy
 // Network Loading
 // ============================================================================
 bool NNUE::loadNetwork(const std::string& filepath) {
-    const std::size_t expectedSize = sizeof(i16) *
+    // The serialized tensor payload is followed by padding up to a 64-byte
+    // file boundary in the distributed quantised-v14.bin model. The original
+    // loader consumed the tensor blocks sequentially and ignored this tail.
+    // Accept either the raw tensor payload or its exact 64-byte-aligned size;
+    // never treat the padding as NNUE weights.
+    const std::size_t payloadSize = sizeof(i16) *
         (INPUT_SIZE * HL_SIZE + HL_SIZE +
          2 * HL_SIZE * OUTPUT_BUCKETS + OUTPUT_BUCKETS);
+    constexpr std::size_t FILE_ALIGNMENT = 64;
+    const std::size_t paddedFileSize =
+        (payloadSize + FILE_ALIGNMENT - 1) & ~(FILE_ALIGNMENT - 1);
 
     // Read into a temporary heap buffer first. A failed read must not leave a
     // partially overwritten network active in the searcher.
@@ -248,15 +256,21 @@ bool NNUE::loadNetwork(const std::string& filepath) {
     }
 
     const std::streamoff fileSize = stream.tellg();
-    if (fileSize < 0 || static_cast<std::uint64_t>(fileSize) != expectedSize) {
+    const std::uint64_t actualFileSize =
+        fileSize < 0 ? 0 : static_cast<std::uint64_t>(fileSize);
+    if (fileSize < 0 ||
+        (actualFileSize != payloadSize && actualFileSize != paddedFileSize)) {
         std::cout << "info string NNUE load failed: size mismatch for "
-                  << filepath << " (got "
-                  << (fileSize < 0 ? 0 : static_cast<std::uint64_t>(fileSize))
-                  << " bytes, expected " << expectedSize << ")" << std::endl;
+                  << filepath << " (got " << actualFileSize
+                  << " bytes, expected payload " << payloadSize
+                  << " bytes or 64-byte-padded file " << paddedFileSize
+                  << " bytes)" << std::endl;
         return false;
     }
 
-    std::vector<std::uint8_t> data(expectedSize);
+    // Deliberately read only the tensor payload. For the shipped file this
+    // leaves its final 48-byte alignment tail unread.
+    std::vector<std::uint8_t> data(payloadSize);
     stream.seekg(0, std::ios::beg);
     if (!stream.read(reinterpret_cast<char*>(data.data()),
                      static_cast<std::streamsize>(data.size()))) {
@@ -279,9 +293,9 @@ bool NNUE::loadNetwork(const std::string& filepath) {
     }
     copyBlock(outputBias.data(), outputBias.size() * sizeof(i16));
 
-    if (offset != expectedSize) {
-        // Defensive consistency check; the file layout above should consume
-        // every byte after the exact-size validation.
+    if (offset != payloadSize) {
+        // Defensive consistency check; the block layout must consume the
+        // complete tensor payload. Any accepted alignment tail is not data.
         loaded = false;
         std::cout << "info string NNUE load failed: internal layout mismatch"
                   << std::endl;
@@ -290,7 +304,9 @@ bool NNUE::loadNetwork(const std::string& filepath) {
 
     loaded = true;
     std::cout << "info string NNUE loaded: " << filepath
-              << " bytes=" << expectedSize
+              << " file_bytes=" << actualFileSize
+              << " payload_bytes=" << payloadSize
+              << " padding_bytes=" << (actualFileSize - payloadSize)
               << " hidden=" << HL_SIZE
               << " buckets=" << OUTPUT_BUCKETS << std::endl;
     return true;
