@@ -28,12 +28,15 @@ def value(name):
     if not match:
         raise SystemExit(f"Cannot read {name} from src/config.h")
     return int(match.group(1))
-expected = 2 * (value("INPUT_SIZE") * value("HL_SIZE") + value("HL_SIZE") +
-                2 * value("HL_SIZE") * value("OUTPUT_BUCKETS") + value("OUTPUT_BUCKETS"))
+payload = 2 * (value("INPUT_SIZE") * value("HL_SIZE") + value("HL_SIZE") +
+               2 * value("HL_SIZE") * value("OUTPUT_BUCKETS") + value("OUTPUT_BUCKETS"))
+padded = (payload + 63) & ~63
 actual = Path("quantised-v14.bin").stat().st_size
-print(f"NNUE size: {actual} bytes (expected {expected})")
-if actual != expected:
-    raise SystemExit("quantised-v14.bin does not match the NNUE layout")
+print(f"NNUE size: {actual} bytes (payload {payload}; 64-byte-padded {padded})")
+if actual not in (payload, padded):
+    raise SystemExit("quantised-v14.bin does not match the NNUE payload or its 64-byte-padded file size")
+if actual > payload:
+    print(f"Accepted {actual - payload} trailing alignment bytes; the loader reads only the NNUE tensor payload.")
 PY
 
 export CXX="$TOOLCHAIN/aarch64-linux-android24-clang++"
