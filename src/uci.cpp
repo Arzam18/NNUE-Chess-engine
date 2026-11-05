@@ -16,6 +16,11 @@
 #include <algorithm>
 #include <fstream>
 #include <random>
+#include <cstdint>
+
+#if defined(__ANDROID__) || defined(__linux__)
+#include <unistd.h>
+#endif
 
 #ifndef __has_include
 #define __has_include(x) 0
@@ -86,7 +91,44 @@ static std::vector<std::string> split(const std::string& s, char delimiter) {
     return tokens;
 }
 
+static std::string getExecutablePath(int argc, char* argv[]) {
+#if defined(__ANDROID__) || defined(__linux__)
+    char path[4096];
+    const ssize_t length = ::readlink("/proc/self/exe", path, sizeof(path) - 1);
+    if (length > 0) {
+        path[length] = '\0';
+        return std::string(path);
+    }
+#endif
+    if (argc > 0 && argv != nullptr && argv[0] != nullptr)
+        return std::string(argv[0]);
+    return std::string();
+}
+
+static bool loadDefaultNNUE(int argc, char* argv[]) {
+    // First preserve the normal UCI/current-working-directory behavior.
+    if (g_nnue.loadNetwork(EVALFILE)) return true;
+
+    const std::string evalName = EVALFILE;
+    if (evalName.empty() || evalName[0] == '/') return false;
+
+    // Android engine hosts do not always set cwd to the engine's folder.
+    // The build artifact keeps the NNUE beside the executable, so try there.
+    const std::string executable = getExecutablePath(argc, argv);
+    const std::size_t slash = executable.find_last_of('/');
+    if (slash == std::string::npos) return false;
+
+    const std::string candidate = executable.substr(0, slash + 1) + evalName;
+    if (candidate == evalName) return false;
+    return g_nnue.loadNetwork(candidate);
+}
+
 static void run_bench(ThreadInfo& thread) {
+    if (!g_nnue.loaded) {
+        std::cout << "info string ERROR: bench refused because NNUE is not loaded" << std::endl;
+        return;
+    }
+
     chess::Board bench_board;
 
     clearTT();
@@ -423,10 +465,13 @@ static bool process_command(const std::string& line, chess::Board& board, Thread
                 if (i + 1 < tokens.size()) path += " ";
             }
 
-            g_nnue.loadNetwork(path);
-
-            board.setFen(chess::constants::STARTPOS);
-            thread.accumulatorStack.resetAccumulators(board);
+            if (g_nnue.loadNetwork(path)) {
+                board.setFen(chess::constants::STARTPOS);
+                thread.accumulatorStack.resetAccumulators(board);
+            } else {
+                std::cout << "info string EvalFile rejected; previous NNUE state retained"
+                          << std::endl;
+            }
         } else if (tokens.size() >= 5 && tokens[1] == "name" && tokens[2] == "PolicyFile" && tokens[3] == "value") {
             std::string path;
 
@@ -547,6 +592,16 @@ static bool process_command(const std::string& line, chess::Board& board, Thread
 
         thread.accumulatorStack.resetAccumulators(board);
     } else if (command == "go") {
+        if (!g_nnue.loaded) {
+            std::cout << "info string ERROR: search refused; NNUE is not loaded. "
+                      << "Place " << EVALFILE
+                      << " beside the engine or set the EvalFile option to its full path."
+                      << std::endl;
+            std::cout << "bestmove 0000" << std::endl;
+            std::cout.flush();
+            return true;
+        }
+
         int wtime = 0, btime = 0, winc = 0, binc = 0, movestogo = 30;
         int depth = 99;
         int movetime = -1;
@@ -582,8 +637,12 @@ static bool process_command(const std::string& line, chess::Board& board, Thread
     } else if (command == "quit") {
         return false;
     } else if (command == "eval") {
-        int val = g_nnue.evaluate(board, thread);
-        std::cout << "NNUE static eval: " << val << std::endl;
+        if (!g_nnue.loaded) {
+            std::cout << "info string ERROR: NNUE is not loaded" << std::endl;
+        } else {
+            int val = g_nnue.evaluate(board, thread);
+            std::cout << "NNUE static eval: " << val << std::endl;
+        }
     } else if (command == "policy" || command == "policydebug") {
         int topN = 16;
 
@@ -678,8 +737,12 @@ void uci_loop(int argc, char* argv[]) {
     initTT(256);
 
     std::cout << "info string Loading NNUE..." << std::endl;
-    g_nnue.loadNetwork(EVALFILE);
-    std::cout << "info string NNUE loaded" << std::endl;
+    if (loadDefaultNNUE(argc, argv)) {
+        std::cout << "info string NNUE ready; search enabled" << std::endl;
+    } else {
+        std::cout << "info string ERROR: NNUE unavailable; search is disabled until a valid EvalFile is loaded"
+                  << std::endl;
+    }
 
 #if HAVE_POLICY_EMBED
     std::cout << "info string Loading Policy (embedded)..." << std::endl;

@@ -22,6 +22,9 @@ struct NNUE {
     alignas(NN_ALIGNMENT) std::array<std::array<i16, 2 * HL_SIZE>, OUTPUT_BUCKETS> weightsToOut;
     std::array<i16, OUTPUT_BUCKETS> outputBias;
 
+    // A search must never run with zero-filled or partially loaded NNUE weights.
+    bool loaded = false;
+
     static i16 ReLU(const i16 x);
     static i16 CReLU(const i16 x);
     static i32 SCReLU(const i16 x);
@@ -31,7 +34,7 @@ struct NNUE {
     static usize feature(chess::Color perspective, chess::Color color, chess::PieceType piece, chess::Square square, chess::Square wk, chess::Square bk);
     
     static usize getMaterialBucket(const chess::Board& board);
-    void loadNetwork(const std::string& filepath);
+    bool loadNetwork(const std::string& filepath);
     int forwardPass(const chess::Board* board, const AccumulatorPair& accumulators);
     static i16 evaluate(const chess::Board& board, ThreadInfo& thisThread);
     void debugNetwork(const chess::Board& board, const AccumulatorPair& accumulators);

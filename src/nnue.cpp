@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <iostream>
 #include <iomanip>
+#include <vector>
 
 NNUE g_nnue;
 
@@ -232,59 +233,75 @@ usize NNUE::feature(chess::Color perspective, chess::Color color, chess::PieceTy
 // ============================================================================
 // Network Loading
 // ============================================================================
-void NNUE::loadNetwork(const std::string& filepath) {
-    std::ifstream stream(filepath, std::ios::binary);
+bool NNUE::loadNetwork(const std::string& filepath) {
+    const std::size_t expectedSize = sizeof(i16) *
+        (INPUT_SIZE * HL_SIZE + HL_SIZE +
+         2 * HL_SIZE * OUTPUT_BUCKETS + OUTPUT_BUCKETS);
+
+    // Read into a temporary heap buffer first. A failed read must not leave a
+    // partially overwritten network active in the searcher.
+    std::ifstream stream(filepath, std::ios::binary | std::ios::ate);
     if (!stream.is_open()) {
-        std::cerr << "ERROR: Failed to open network file: " << filepath << std::endl;
-        return;
+        std::cout << "info string NNUE load failed: cannot open "
+                  << filepath << std::endl;
+        return false;
     }
 
-    // Get file size for diagnostics
-    stream.seekg(0, std::ios::end);
-    size_t fileSize = stream.tellg();
+    const std::streamoff fileSize = stream.tellg();
+    if (fileSize < 0 || static_cast<std::uint64_t>(fileSize) != expectedSize) {
+        std::cout << "info string NNUE load failed: size mismatch for "
+                  << filepath << " (got "
+                  << (fileSize < 0 ? 0 : static_cast<std::uint64_t>(fileSize))
+                  << " bytes, expected " << expectedSize << ")" << std::endl;
+        return false;
+    }
+
+    std::vector<std::uint8_t> data(expectedSize);
     stream.seekg(0, std::ios::beg);
+    if (!stream.read(reinterpret_cast<char*>(data.data()),
+                     static_cast<std::streamsize>(data.size()))) {
+        std::cout << "info string NNUE load failed: incomplete read from "
+                  << filepath << std::endl;
+        return false;
+    }
 
-    size_t expectedSize = sizeof(i16) * (INPUT_SIZE * HL_SIZE + HL_SIZE + 2 * HL_SIZE * OUTPUT_BUCKETS + OUTPUT_BUCKETS);
-    std::cout << "Network file size: " << fileSize << " bytes" << std::endl;
-    std::cout << "Expected size: " << expectedSize << " bytes" << std::endl;
+    std::size_t offset = 0;
+    auto copyBlock = [&](void* destination, std::size_t bytes) {
+        std::memcpy(destination, data.data() + offset, bytes);
+        offset += bytes;
+    };
 
-    // Load weightsToHL (768 * HL_SIZE)
-    stream.read(reinterpret_cast<char*>(weightsToHL.data()), weightsToHL.size() * sizeof(i16));
-    std::cout << "After weightsToHL, position: " << stream.tellg() << std::endl;
-
-    // Load hiddenLayerBias (HL_SIZE)
-    stream.read(reinterpret_cast<char*>(hiddenLayerBias.data()), hiddenLayerBias.size() * sizeof(i16));
-    std::cout << "After hiddenLayerBias, position: " << stream.tellg() << std::endl;
-
-    // Load weightsToOut - bucket by bucket!
+    copyBlock(weightsToHL.data(), weightsToHL.size() * sizeof(i16));
+    copyBlock(hiddenLayerBias.data(), hiddenLayerBias.size() * sizeof(i16));
     for (usize bucket = 0; bucket < OUTPUT_BUCKETS; ++bucket) {
-        stream.read(reinterpret_cast<char*>(weightsToOut[bucket].data()),
-                    weightsToOut[bucket].size() * sizeof(i16));
+        copyBlock(weightsToOut[bucket].data(),
+                  weightsToOut[bucket].size() * sizeof(i16));
     }
-    std::cout << "After weightsToOut, position: " << stream.tellg() << std::endl;
+    copyBlock(outputBias.data(), outputBias.size() * sizeof(i16));
 
-    // Load outputBias (OUTPUT_BUCKETS)
-    stream.read(reinterpret_cast<char*>(outputBias.data()), outputBias.size() * sizeof(i16));
-    std::cout << "After outputBias, position: " << stream.tellg() << std::endl;
-
-    if (!stream) {
-        std::cerr << "ERROR: Malformed or incomplete network file: " << filepath << std::endl;
-    } else {
-        std::cout << "NNUE file loaded successfully: " << filepath << std::endl;
-        std::cout << "  Hidden layer size: " << HL_SIZE << std::endl;
-        std::cout << "  Output buckets: " << OUTPUT_BUCKETS << std::endl;
-        std::cout << "  Output biases: ";
-        for (size_t i = 0; i < OUTPUT_BUCKETS; i++) {
-            std::cout << outputBias[i] << " ";
-        }
-        std::cout << std::endl;
+    if (offset != expectedSize) {
+        // Defensive consistency check; the file layout above should consume
+        // every byte after the exact-size validation.
+        loaded = false;
+        std::cout << "info string NNUE load failed: internal layout mismatch"
+                  << std::endl;
+        return false;
     }
+
+    loaded = true;
+    std::cout << "info string NNUE loaded: " << filepath
+              << " bytes=" << expectedSize
+              << " hidden=" << HL_SIZE
+              << " buckets=" << OUTPUT_BUCKETS << std::endl;
+    return true;
 }
 
 // ============================================================================
 // Forward Pass
 // ============================================================================
 int NNUE::forwardPass(const chess::Board* board, const AccumulatorPair& accumulators) {
+    if (!loaded || board == nullptr) return 0;
+
     const usize outputBucket = getMaterialBucket(*board);
     const bool isWhiteSTM = board->sideToMove() == chess::Color::WHITE;
     const Accumulator& accumulatorSTM = isWhiteSTM ? accumulators.white : accumulators.black;
@@ -303,6 +320,7 @@ int NNUE::forwardPass(const chess::Board* board, const AccumulatorPair& accumula
 // Evaluate
 // ============================================================================
 i16 NNUE::evaluate(const chess::Board& board, ThreadInfo& thisThread) {
+    if (!g_nnue.loaded) return 0;
     const int eval = g_nnue.forwardPass(&board, thisThread.accumulatorStack.current());
     return std::clamp(eval, Search::TB_MATED_IN_MAX_PLY, Search::TB_MATE_IN_MAX_PLY);
 }
