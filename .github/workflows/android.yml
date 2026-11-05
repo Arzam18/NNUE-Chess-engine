@@ -69,12 +69,16 @@ jobs:
           input_size = value("INPUT_SIZE")
           hidden_size = value("HL_SIZE")
           buckets = value("OUTPUT_BUCKETS")
-          expected = 2 * (input_size * hidden_size + hidden_size +
-                          2 * hidden_size * buckets + buckets)
+          payload = 2 * (input_size * hidden_size + hidden_size +
+                         2 * hidden_size * buckets + buckets)
+          # The distributed model is padded to a 64-byte file boundary.
+          padded = (payload + 63) & ~63
           actual = Path("quantised-v14.bin").stat().st_size
-          print(f"NNUE size: {actual} bytes (expected {expected})")
-          if actual != expected:
-              raise SystemExit("quantised-v14.bin does not match the NNUE layout")
+          print(f"NNUE size: {actual} bytes (payload {payload}; 64-byte-padded {padded})")
+          if actual not in (payload, padded):
+              raise SystemExit("quantised-v14.bin does not match the NNUE payload or its 64-byte-padded file size")
+          if actual > payload:
+              print(f"Accepted {actual - payload} trailing alignment bytes; the loader reads only the NNUE tensor payload.")
           PYNNUE
 
       - name: Build ARM64 engine
