@@ -34,11 +34,15 @@ jobs:
           test -x "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++"
           echo "ndk=$NDK" >> "$GITHUB_OUTPUT"
 
+      - name: Set build script permission
+        shell: bash
+        run: chmod +x ./build-android-arm64.sh
+
       - name: Build with explicitly enabled embedded NNUE loader
         shell: bash
         env:
           NDK_PATH: ${{ steps.ndk.outputs.ndk }}
-        run: ./build-android-arm64.sh
+        run: bash ./build-android-arm64.sh
 
       - name: Verify self-contained artifact
         shell: bash
