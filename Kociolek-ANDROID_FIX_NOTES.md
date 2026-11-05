@@ -1,45 +1,35 @@
-# Kociolek 2.3 — Android ARM64 self-contained NNUE build
+# Kociolek 2.3 — Embedded NNUE loader compile-flag fix
 
-## What this revision changes
+## Diagnosis from the Galaxy A16 Termux log
 
-The previous Android artifact shipped `quantised-v14.bin` beside the executable. That was not a self-contained engine and could fail when DroidFish launched the executable from a different directory. This revision embeds the original network bytes into a read-only ELF section at link time.
+The engine printed neither `Loading embedded NNUE quantised-v14.bin` nor `NNUE loaded: embedded quantised-v14.bin`. It instead attempted `quantised-v14.bin` as a working-directory file and then an executable-directory file. This proves that the C++ embedded-NNUE startup branch guarded by `KOCIOLEK_EMBED_NNUE` was not active in the tested executable. The policy networks were embedded independently, which explains why their startup messages appeared.
 
-- `src/nnue_embed.S` uses assembler `.incbin` to include the repository's original `quantised-v14.bin` bytes in the executable.
-- `src/uci.cpp` loads the embedded network before any external-file fallback.
-- `NNUE::loadNetworkFromMemory()` validates and loads the embedded bytes using the exact tensor layout already defined in `src/config.h`.
-- The existing 1,607,744-byte distributed file is accepted as 1,607,696 bytes of tensor payload plus 48 trailing alignment bytes. The tail is not interpreted as weights.
-- The final ZIP contains the executable and build information only; it intentionally contains no `.bin` companion network.
-- The policy networks continue to use the project's existing generated embedded headers.
+The earlier build script put `-DKOCIOLEK_EMBED_NNUE=1` in the exported `CXXFLAGS`. The corrected build passes this as an explicit `CPPFLAGS` make argument and updates the Makefile recipe to include `$(CPPFLAGS)`. It also deletes the exact Android target before rebuilding, so an old target cannot be reused.
 
-## Search startup
+## Files changed
 
-`uci` still reports the engine identity normally. Startup must additionally print:
+- `Makefile`: adds `CPPFLAGS` to the actual C++ compile command.
+- `build-android-arm64.sh`: explicitly passes `-DKOCIOLEK_EMBED_NNUE=1`, removes stale output, checks for the embedded-loader message in the executable, and validates the embedded symbol size against the original network file.
+- `.github/workflows/android.yml`: runs the corrected build and verifies the embedded-loader compile flag is recorded in build metadata.
+
+No NNUE weights, search logic, evaluator math, policy model, thread count, or playing-strength behavior are changed. `src/nnue_embed.S` still embeds the repository's original `quantised-v14.bin` bytes unchanged. The external network is not packaged beside the final executable.
+
+## Expected Termux startup
+
+A correct new binary must print a line similar to:
 
 `info string Loading embedded NNUE quantised-v14.bin (1607744 bytes)...`
 
+followed by:
+
 `info string NNUE loaded: embedded quantised-v14.bin file_bytes=1607744 payload_bytes=1607696 padding_bytes=48 hidden=1024 buckets=8`
+
+and:
 
 `info string NNUE ready; search enabled`
 
-If these messages are absent, the Android binary is not the embedded build or the build failed to include the expected network. A valid `go depth 8` should produce search `info` lines followed by a legal `bestmove`.
+Then `go depth 8` must produce search `info` lines and a legal `bestmove`. Do not consider the engine fixed until this is confirmed on the phone.
 
-## Build requirements
+## Build target
 
-The repository must contain the original, unmodified files:
-
-- `quantised-v14.bin`
-- `Policy-big.bin`
-- `quantised-64.bin`
-
-The workflow validates the NNUE file size and embeds its bytes. It does not download, rewrite, truncate, or alter the network. The artifact is self-contained with respect to the NNUE and policy networks.
-
-## Android target
-
-- AArch64 / Android API 24
-- ARMv8-A NEON (`-march=armv8-a+simd`)
-- No Dotprod claim
-- One search thread, preserving the original setting
-
-## Validation limits
-
-The source changes and packaging scripts require a real GitHub Actions run with the repository's real network files, followed by a Galaxy A16 DroidFish UCI test. Do not treat a host build with synthetic weights as evidence of chess strength. Confirm startup messages, `isready` / `readyok`, `position startpos`, `go depth 8`, search info, and a legal `bestmove` before strength testing.
+Android API 24, AArch64, ARMv8-A NEON (`-march=armv8-a+simd`), one search thread. This is not a Dotprod build.

@@ -1,6 +1,7 @@
 .RECIPEPREFIX := >
 
 CXX ?= g++
+CPPFLAGS ?=
 
 CXXFLAGS ?= -std=c++17 -O3 -flto=auto -march=x86-64-v3 -DNDEBUG -pthread -static 
 
@@ -71,7 +72,7 @@ embed: src/policy_embed.h src/policy_embed_small.h
 # ============================================================================
 
 $(TARGET): $(SOURCES) src/policy_embed.h src/policy_embed_small.h $(EXTRA_OBJECTS)
-> $(CXX) $(CXXFLAGS) $(SOURCES) $(EXTRA_OBJECTS) -o $(TARGET)
+> $(CXX) $(CPPFLAGS) $(CXXFLAGS) $(SOURCES) $(EXTRA_OBJECTS) -o $(TARGET)
 
 # ============================================================================
 # Clean
