@@ -2,24 +2,17 @@ name: Build Kociolek Android ARM64
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - ".github/workflows/android.yml"
-      - "Makefile"
-      - "src/**"
-      - "tools/**"
-      - "*.bin"
 
 permissions:
   contents: read
 
 jobs:
   android-arm64:
-    name: Build Android ARM64 with ARM NEON
+    name: Build self-contained Android ARM64 NEON engine
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout source
+      - name: Checkout source and original networks
         uses: actions/checkout@v4
 
       - name: Install build tools
@@ -41,95 +34,26 @@ jobs:
           test -x "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++"
           echo "ndk=$NDK" >> "$GITHUB_OUTPUT"
 
-      - name: Verify network files
-        shell: bash
-        run: |
-          set -euo pipefail
-          for f in quantised-v14.bin Policy-big.bin quantised-64.bin; do
-            if [ ! -s "$f" ]; then
-              echo "::error::Required network file is missing or empty: $f"
-              exit 1
-            fi
-          done
-
-          # NNUE::loadNetwork reads this exact 768x1024 input layer, 1024
-          # hidden biases, 8 output buckets (two 1024-wide perspectives),
-          # and 8 output biases. Reject a wrong/partial model before building.
-          python3 - <<'PYNNUE'
-          from pathlib import Path
-          import re
-
-          config = Path("src/config.h").read_text(encoding="utf-8")
-          def value(name):
-              match = re.search(rf"constexpr\s+usize\s+{name}\s*=\s*(\d+)", config)
-              if not match:
-                  raise SystemExit(f"Cannot read {name} from src/config.h")
-              return int(match.group(1))
-
-          input_size = value("INPUT_SIZE")
-          hidden_size = value("HL_SIZE")
-          buckets = value("OUTPUT_BUCKETS")
-          payload = 2 * (input_size * hidden_size + hidden_size +
-                         2 * hidden_size * buckets + buckets)
-          # The distributed model is padded to a 64-byte file boundary.
-          padded = (payload + 63) & ~63
-          actual = Path("quantised-v14.bin").stat().st_size
-          print(f"NNUE size: {actual} bytes (payload {payload}; 64-byte-padded {padded})")
-          if actual not in (payload, padded):
-              raise SystemExit("quantised-v14.bin does not match the NNUE payload or its 64-byte-padded file size")
-          if actual > payload:
-              print(f"Accepted {actual - payload} trailing alignment bytes; the loader reads only the NNUE tensor payload.")
-          PYNNUE
-
-      - name: Build ARM64 engine
+      - name: Build with embedded NNUE
         shell: bash
         env:
           NDK_PATH: ${{ steps.ndk.outputs.ndk }}
+        run: ./build-android-arm64.sh
+
+      - name: Verify self-contained artifact
+        shell: bash
         run: |
           set -euo pipefail
-          TOOLCHAIN="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          unzip -l dist/Kociolek-2.3-Android-ARM64.zip
+          if unzip -Z1 dist/Kociolek-2.3-Android-ARM64.zip | grep -q '\.bin$'; then
+            echo "::error::Unexpected external network file in final artifact"
+            exit 1
+          fi
+          unzip -p dist/Kociolek-2.3-Android-ARM64.zip build-info.txt | grep -q 'Embedded NNUE: quantised-v14.bin'
 
-          export CXX="$TOOLCHAIN/aarch64-linux-android24-clang++"
-          export CC="$TOOLCHAIN/aarch64-linux-android24-clang"
-          export AR="$TOOLCHAIN/llvm-ar"
-          export RANLIB="$TOOLCHAIN/llvm-ranlib"
-          export STRIP="$TOOLCHAIN/llvm-strip"
-          export PYTHON=python3
-
-          # AArch64 Android supports Advanced SIMD (NEON) as part of the architecture.
-          # Keep CXXFLAGS in the environment so Makefile's -D network settings are appended.
-          export CXXFLAGS='-std=c++17 -O3 -DNDEBUG -pthread -march=armv8-a+simd -mtune=cortex-a53 -static-libstdc++'
-
-          make clean || true
-          make clean-embed || true
-          make -j2 \
-            TARGET=Kociolek-2.3-android-arm64 \
-            EVALFILE=quantised-v14.bin \
-            POLICYFILE=Policy-big.bin \
-            POLICYFILE_SMALL=quantised-64.bin \
-            KOCIOLEK_POLICY_HL=2048 \
-            POLICY_SMALL_HL=64
-
-          test -s Kociolek-2.3-android-arm64
-          mkdir -p dist
-          cp Kociolek-2.3-android-arm64 dist/
-          cp quantised-v14.bin dist/
-          chmod +x dist/Kociolek-2.3-android-arm64
-
-          file dist/Kociolek-2.3-android-arm64 | tee dist/build-info.txt
-          "$TOOLCHAIN/llvm-readelf" -h dist/Kociolek-2.3-android-arm64 >> dist/build-info.txt
-          grep -q 'AArch64' dist/build-info.txt
-          echo "NNUE companion: quantised-v14.bin ($(stat -c%s quantised-v14.bin) bytes)" >> dist/build-info.txt
-          sha256sum quantised-v14.bin >> dist/build-info.txt
-
-          # Keep the NNUE beside the executable. The UCI loader now checks
-          # both the process working directory and the executable directory.
-          (cd dist && zip -9 Kociolek-2.3-Android-ARM64.zip \
-            Kociolek-2.3-android-arm64 quantised-v14.bin build-info.txt)
-
-      - name: Upload Android ARM64 build
+      - name: Upload Android ARM64 engine
         uses: actions/upload-artifact@v4
         with:
-          name: Kociolek-2.3-Android-ARM64
+          name: Kociolek-2.3-Android-ARM64-Embedded-NNUE
           path: dist/Kociolek-2.3-Android-ARM64.zip
           if-no-files-found: error
